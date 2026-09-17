@@ -20,6 +20,39 @@ export const SLA_POLICY_HOURS: Record<Severity, number> = {
   Low: 72,
 };
 
+/** Fixed set so cross-category patterns are countable, not free text. */
+export const ROOT_CAUSE_TAGS = [
+  "Static or reference data",
+  "Batch or cut-off failure",
+  "Manual handoff",
+  "Screening or sanctions hold",
+  "Data mapping",
+  "Approval bottleneck",
+  "Third party or vendor",
+  "System defect",
+  "Client-side issue",
+  "Unclassified",
+] as const;
+export type RootCauseTag = (typeof ROOT_CAUSE_TAGS)[number];
+
+/** Grades that handle escalations, with the hourly cost used for handling cost. */
+export const HANDLING_GRADES = ["Analyst", "Senior Analyst", "AVP", "VP"] as const;
+export type HandlingGrade = (typeof HANDLING_GRADES)[number];
+export const GRADE_RATES: Record<HandlingGrade, number> = {
+  Analyst: 22,
+  "Senior Analyst": 28,
+  AVP: 35,
+  VP: 45,
+};
+
+/** Default handling assumptions per severity, editable per escalation. */
+export const DEFAULT_HANDLING: Record<Severity, { hours: number; grade: HandlingGrade }> = {
+  Critical: { hours: 6, grade: "VP" },
+  High: { hours: 4, grade: "AVP" },
+  Medium: { hours: 2, grade: "Senior Analyst" },
+  Low: { hours: 0.5, grade: "Analyst" },
+};
+
 export const SEVERITY_RANK: Record<Severity, number> = { Critical: 0, High: 1, Medium: 2, Low: 3 };
 
 /** A category appearing this many times within the window is flagged as recurring. */
@@ -27,6 +60,14 @@ export const PATTERN_THRESHOLD = 3;
 export const PATTERN_WINDOW_DAYS = 30;
 
 export type TriageSource = "ai" | "rules";
+
+/** One line of the audit trail. Append only. */
+export type AuditEntry = {
+  at: string;
+  by: string;
+  action: string;
+  detail?: string;
+};
 
 export type Escalation = {
   id: string;
@@ -41,7 +82,31 @@ export type Escalation = {
   triageSource: TriageSource | null;
   resolvedAt: string | null;
   owner: string | null;
+  rootCauseTag: RootCauseTag | null;
+  handlingHours: number;
+  handlingGrade: HandlingGrade;
+  feeCredit: number;
+  history: AuditEntry[];
 };
+
+/** A root cause review raised off a recurring category or a cross-category theme. */
+export type ReviewAction = {
+  id: string;
+  kind: "category" | "rootCause";
+  subject: string;
+  owner: string;
+  dueDate: string;
+  createdAt: string;
+  createdBy: string;
+  status: "open" | "complete";
+  note: string | null;
+};
+
+export const audit = (by: string, action: string, detail?: string): AuditEntry => ({
+  at: new Date().toISOString(),
+  by,
+  ...(detail ? { action, detail } : { action }),
+});
 
 /* ---------- SLA and urgency ---------- */
 
@@ -90,23 +155,203 @@ export const formatDateTime = (iso: string | number) =>
     minute: "2-digit",
   }).format(new Date(iso));
 
+/* ---------- commercial value ---------- */
+
+export const handlingCost = (e: Escalation) =>
+  Math.round(e.handlingHours * GRADE_RATES[e.handlingGrade]);
+
+/** Handling cost plus any money credited back to the client. */
+export const totalCost = (e: Escalation) => handlingCost(e) + e.feeCredit;
+
+export const gbp = (n: number) =>
+  new Intl.NumberFormat("en-GB", {
+    style: "currency",
+    currency: "GBP",
+    maximumFractionDigits: 0,
+  }).format(n);
+
 /* ---------- pattern detection ---------- */
 
-export type CategoryCount = { category: Category; count: number; open: number; recurring: boolean };
+export type CategoryCount = {
+  category: Category;
+  count: number;
+  open: number;
+  cost: number;
+  recurring: boolean;
+};
 
-/** Counts escalations per category received in the last 30 days (open and resolved). */
-export function categoryPatterns(items: Escalation[], now = Date.now()): CategoryCount[] {
-  const since = now - PATTERN_WINDOW_DAYS * 24 * HOUR;
-  const recent = items.filter((e) => new Date(e.receivedAt).getTime() >= since);
+/** Escalations received inside a window (open and resolved alike). */
+export const inPeriod = (items: Escalation[], from: number, to: number) =>
+  items.filter((e) => {
+    const t = new Date(e.receivedAt).getTime();
+    return t >= from && t <= to;
+  });
+
+export const lastDays = (days: number, now = Date.now()) => now - days * 24 * HOUR;
+
+/** Counts escalations per category in a window. Defaults to the last 30 days. */
+export function categoryPatterns(
+  items: Escalation[],
+  now = Date.now(),
+  from = lastDays(PATTERN_WINDOW_DAYS, now),
+): CategoryCount[] {
+  const recent = inPeriod(items, from, now);
   return CATEGORIES.map((category) => {
     const inCat = recent.filter((e) => e.category === category);
     return {
       category,
       count: inCat.length,
       open: inCat.filter((e) => e.status !== "resolved").length,
+      cost: inCat.reduce((s, e) => s + totalCost(e), 0),
       recurring: inCat.length >= PATTERN_THRESHOLD,
     };
   }).sort((a, b) => b.count - a.count);
+}
+
+export type RootCauseTheme = {
+  tag: RootCauseTag;
+  count: number;
+  categories: Category[];
+  clients: string[];
+  cost: number;
+  ids: string[];
+  /** Different categories, same underlying cause: the pattern a category count hides. */
+  crossCategory: boolean;
+  flagged: boolean;
+};
+
+/**
+ * Groups a window by root cause tag rather than category, so "different issues, same
+ * underlying cause" surfaces. Flagged at the same threshold as categories.
+ */
+export function rootCauseThemes(
+  items: Escalation[],
+  now = Date.now(),
+  from = lastDays(PATTERN_WINDOW_DAYS, now),
+): RootCauseTheme[] {
+  const recent = inPeriod(items, from, now).filter((e) => e.rootCauseTag);
+  const byTag = new Map<RootCauseTag, Escalation[]>();
+  for (const e of recent) {
+    const tag = e.rootCauseTag as RootCauseTag;
+    byTag.set(tag, [...(byTag.get(tag) ?? []), e]);
+  }
+  return [...byTag.entries()]
+    .map(([tag, list]) => {
+      const categories = [...new Set(list.map((e) => e.category))];
+      return {
+        tag,
+        count: list.length,
+        categories,
+        clients: [...new Set(list.map((e) => e.client))],
+        cost: list.reduce((s, e) => s + totalCost(e), 0),
+        ids: list.map((e) => e.id),
+        crossCategory: categories.length > 1,
+        flagged: list.length >= PATTERN_THRESHOLD && categories.length > 1,
+      };
+    })
+    .sort((a, b) => b.count - a.count);
+}
+
+/* ---------- reporting ---------- */
+
+export type PeriodMetrics = {
+  total: number;
+  open: number;
+  resolved: number;
+  breached: number;
+  slaMetRate: number | null;
+  bySeverity: Record<Severity, number>;
+  handlingCost: number;
+  feeCredits: number;
+  cost: number;
+  avgResolutionHours: number | null;
+};
+
+const resolvedWithinSla = (e: Escalation) =>
+  e.resolvedAt != null &&
+  e.slaHours != null &&
+  new Date(e.resolvedAt).getTime() - new Date(e.receivedAt).getTime() <= e.slaHours * HOUR;
+
+/** Every number the report quotes, for one window. */
+export function periodMetrics(items: Escalation[], from: number, to: number): PeriodMetrics {
+  const list = inPeriod(items, from, to);
+  const resolved = list.filter((e) => e.status === "resolved");
+  const breachedResolved = resolved.filter((e) => !resolvedWithinSla(e));
+  const breachedOpen = list.filter(
+    (e) => e.status !== "resolved" && urgencyOf(e, to) === "overdue",
+  );
+  const durations = resolved
+    .filter((e) => e.resolvedAt)
+    .map(
+      (e) => (new Date(e.resolvedAt as string).getTime() - new Date(e.receivedAt).getTime()) / HOUR,
+    );
+  return {
+    total: list.length,
+    open: list.filter((e) => e.status !== "resolved").length,
+    resolved: resolved.length,
+    breached: breachedResolved.length + breachedOpen.length,
+    slaMetRate: resolved.length
+      ? (resolved.length - breachedResolved.length) / resolved.length
+      : null,
+    bySeverity: SEVERITIES.reduce(
+      (acc, s) => ({ ...acc, [s]: list.filter((e) => e.severity === s).length }),
+      {} as Record<Severity, number>,
+    ),
+    handlingCost: list.reduce((s, e) => s + handlingCost(e), 0),
+    feeCredits: list.reduce((s, e) => s + e.feeCredit, 0),
+    cost: list.reduce((s, e) => s + totalCost(e), 0),
+    avgResolutionHours: durations.length
+      ? Math.round((durations.reduce((a, b) => a + b, 0) / durations.length) * 10) / 10
+      : null,
+  };
+}
+
+/** Escalations in the window as CSV, for a service review pack. */
+export function toCsv(items: Escalation[]) {
+  const head = [
+    "Ref",
+    "Client",
+    "Category",
+    "Severity",
+    "Root cause",
+    "Root cause tag",
+    "Triaged by",
+    "Received",
+    "SLA hours",
+    "SLA deadline",
+    "Status",
+    "Resolved",
+    "Owner",
+    "Handling hours",
+    "Grade",
+    "Handling cost (GBP)",
+    "Fee credit (GBP)",
+  ];
+  const cell = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const rows = items.map((e) =>
+    [
+      e.id,
+      e.client,
+      e.category,
+      e.severity ?? "",
+      e.rootCause ?? "",
+      e.rootCauseTag ?? "",
+      e.triageSource ?? "",
+      e.receivedAt,
+      e.slaHours ?? "",
+      slaDeadline(e) ? new Date(slaDeadline(e) as number).toISOString() : "",
+      e.status,
+      e.resolvedAt ?? "",
+      e.owner ?? "",
+      e.handlingHours,
+      e.handlingGrade,
+      handlingCost(e),
+      e.feeCredit,
+    ]
+      .map(cell)
+      .join(","),
+  );
+  return [head.map(cell).join(","), ...rows].join("\n");
 }
 
 /* ---------- rules-based fallback triage ---------- */
@@ -126,6 +371,13 @@ export function rulesTriage(description: string, category: Category) {
     severity = "High";
   else if (/(typo|cosmetic|format|query|question|minor)/.test(t)) severity = "Low";
   if (category === "Payment Failure" && severity !== "Critical") severity = "High";
+  const tagByCategory: Record<Category, RootCauseTag> = {
+    "Cash Processing Delay": "Batch or cut-off failure",
+    "Reporting Error": "Data mapping",
+    "Reconciliation Discrepancy": "Static or reference data",
+    "Payment Failure": "Static or reference data",
+    Other: "Unclassified",
+  };
   const rootCause: Record<Category, string> = {
     "Cash Processing Delay": "Likely a processing queue or cut-off timing issue.",
     "Reporting Error": "Likely a data mapping or report configuration issue.",
@@ -133,7 +385,12 @@ export function rulesTriage(description: string, category: Category) {
     "Payment Failure": "Likely invalid beneficiary details or a screening hold.",
     Other: "Needs manual review to identify the cause.",
   };
-  return { severity, slaHours: SLA_POLICY_HOURS[severity], rootCause: rootCause[category] };
+  return {
+    severity,
+    slaHours: SLA_POLICY_HOURS[severity],
+    rootCause: rootCause[category],
+    rootCauseTag: tagByCategory[category],
+  };
 }
 
 /* ---------- seed data ---------- */
@@ -148,7 +405,8 @@ const seed = (
   receivedHoursAgo: number,
   description: string,
   rootCause: string,
-  opts: { resolvedHoursAgo?: number; owner?: string } = {},
+  tag: RootCauseTag,
+  opts: { resolvedHoursAgo?: number; owner?: string; feeCredit?: number; hours?: number } = {},
 ): Escalation => ({
   id: `ESC-${1040 + n}`,
   client,
@@ -162,6 +420,31 @@ const seed = (
   triageSource: "ai",
   resolvedAt: opts.resolvedHoursAgo != null ? ago(opts.resolvedHoursAgo) : null,
   owner: opts.owner ?? null,
+  rootCauseTag: tag,
+  handlingHours: opts.hours ?? DEFAULT_HANDLING[severity].hours,
+  handlingGrade: DEFAULT_HANDLING[severity].grade,
+  feeCredit: opts.feeCredit ?? 0,
+  history: [
+    { at: ago(receivedHoursAgo), by: "Client services", action: "Logged" },
+    {
+      at: ago(receivedHoursAgo),
+      by: "AI triage",
+      action: `Triaged as ${severity}`,
+      detail: `SLA ${SLA_POLICY_HOURS[severity]}h · ${tag}`,
+    },
+    ...(opts.owner
+      ? [{ at: ago(receivedHoursAgo), by: "Client services", action: `Assigned to ${opts.owner}` }]
+      : []),
+    ...(opts.resolvedHoursAgo != null
+      ? [
+          {
+            at: ago(opts.resolvedHoursAgo),
+            by: opts.owner ?? "Client services",
+            action: "Resolved",
+          },
+        ]
+      : []),
+  ],
 });
 
 export const seedEscalations = (): Escalation[] => [
@@ -173,6 +456,7 @@ export const seedEscalations = (): Escalation[] => [
     5.5,
     "Monthly pension payroll batch of £4.2m rejected by the clearing bank at 07:00. 1,800 members due to be paid today.",
     "Batch file format rejected after a clearing bank schema change.",
+    "Third party or vendor",
     { owner: "S. Patel" },
   ),
   seed(
@@ -183,6 +467,7 @@ export const seedEscalations = (): Escalation[] => [
     9.25,
     "Subscription monies of £12m received yesterday still not credited to the fund account. Client cannot place trades.",
     "Incoming funds held in suspense awaiting manual reference matching.",
+    "Manual handoff",
     { owner: "J. Okoro" },
   ),
   seed(
@@ -193,6 +478,7 @@ export const seedEscalations = (): Escalation[] => [
     6.5,
     "Custody position for a US Treasury holding differs by 250,000 units between our books and the custodian statement.",
     "Probable unbooked corporate action or late trade settlement.",
+    "Static or reference data",
     { owner: "M. Chen" },
   ),
   seed(
@@ -203,6 +489,7 @@ export const seedEscalations = (): Escalation[] => [
     8,
     "Grant disbursement cash transfer requested on Monday has not been released. Client chasing for confirmation.",
     "Transfer awaiting second-level approval in the payments queue.",
+    "Approval bottleneck",
   ),
   seed(
     5,
@@ -211,7 +498,8 @@ export const seedEscalations = (): Escalation[] => [
     "Medium",
     3,
     "Quarterly performance report shows incorrect benchmark returns for two share classes.",
-    "Benchmark data feed mapped to the wrong index series.",
+    "Benchmark reference data still points at a retired index series.",
+    "Static or reference data",
     { owner: "L. Duarte" },
   ),
   seed(
@@ -222,6 +510,7 @@ export const seedEscalations = (): Escalation[] => [
     20,
     "Client asked why yesterday's interest credit posted a day later than usual. No financial impact reported.",
     "Interest run moved to next-day batch after the calendar update.",
+    "Batch or cut-off failure",
   ),
   seed(
     7,
@@ -231,7 +520,8 @@ export const seedEscalations = (): Escalation[] => [
     30,
     "Outbound EUR payment returned by the beneficiary bank citing an invalid IBAN.",
     "Beneficiary static data captured with a transposed IBAN digit.",
-    { resolvedHoursAgo: 26, owner: "S. Patel" },
+    "Static or reference data",
+    { resolvedHoursAgo: 26, owner: "S. Patel", feeCredit: 500 },
   ),
   seed(
     8,
@@ -241,7 +531,8 @@ export const seedEscalations = (): Escalation[] => [
     96,
     "Redemption proceeds of £30m not paid on value date, client facing late payment penalties.",
     "Cut-off missed after an overnight batch failure in the cash platform.",
-    { resolvedHoursAgo: 93, owner: "J. Okoro" },
+    "Batch or cut-off failure",
+    { resolvedHoursAgo: 88, owner: "J. Okoro", feeCredit: 8500, hours: 9 },
   ),
   seed(
     9,
@@ -251,7 +542,8 @@ export const seedEscalations = (): Escalation[] => [
     240,
     "Standing order to a supplier failed twice this week with a generic rejection code.",
     "Payment held by sanctions screening due to a partial name match.",
-    { resolvedHoursAgo: 228, owner: "A. Brennan" },
+    "Screening or sanctions hold",
+    { resolvedHoursAgo: 205, owner: "A. Brennan", feeCredit: 250 },
   ),
   seed(
     10,
@@ -261,6 +553,7 @@ export const seedEscalations = (): Escalation[] => [
     410,
     "Dividend cash from a Swedish holding not reflected in the client's cash balance.",
     "Foreign income pending FX conversion instruction.",
+    "Manual handoff",
     { resolvedHoursAgo: 398, owner: "M. Chen" },
   ),
 ];

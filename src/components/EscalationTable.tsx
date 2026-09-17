@@ -1,5 +1,16 @@
 import { Fragment, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronRight, CheckCircle2, RotateCcw, Sparkles } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronRight,
+  CheckCircle2,
+  Download,
+  History,
+  RotateCcw,
+  Sparkles,
+} from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -10,11 +21,15 @@ import {
 } from "@/components/ui/select";
 import { SeverityBadge, SlaIndicator } from "@/components/StatusBadges";
 import {
+  HANDLING_GRADES,
   SEVERITIES,
   SEVERITY_RANK,
   formatDateTime,
+  gbp,
+  handlingCost,
   slaDeadline,
   type Escalation,
+  type HandlingGrade,
   type Severity,
 } from "@/lib/escalations";
 import { cn } from "@/lib/utils";
@@ -28,12 +43,16 @@ export function EscalationTable({
   onResolve,
   onReopen,
   onSeverityChange,
+  onPatch,
+  onExport,
 }: {
   items: Escalation[];
   now: number;
   onResolve: (id: string) => void;
   onReopen: (id: string) => void;
-  onSeverityChange: (id: string, s: Severity) => void;
+  onSeverityChange: (id: string, s: Severity, reason: string) => void;
+  onPatch: (id: string, changes: Partial<Escalation>, action: string, detail?: string) => void;
+  onExport: (rows: Escalation[]) => void;
 }) {
   const [view, setView] = useState<View>("open");
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: "deadline", asc: true });
@@ -92,26 +111,36 @@ export function EscalationTable({
             details.
           </p>
         </div>
-        <div
-          className="inline-flex rounded-md border border-border bg-surface-subtle p-0.5 text-xs"
-          role="tablist"
-        >
-          {(["open", "resolved", "all"] as View[]).map((v) => (
-            <button
-              key={v}
-              role="tab"
-              aria-selected={view === v}
-              onClick={() => setView(v)}
-              className={cn(
-                "rounded px-3 py-1.5 font-medium capitalize transition-colors",
-                view === v
-                  ? "bg-navy text-navy-foreground"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {v} <span className="tabular-nums opacity-70">{counts[v]}</span>
-            </button>
-          ))}
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => onExport(rows)}
+            className="print:hidden"
+          >
+            <Download className="size-3.5" /> Export CSV
+          </Button>
+          <div
+            className="inline-flex rounded-md border border-border bg-surface-subtle p-0.5 text-xs"
+            role="tablist"
+          >
+            {(["open", "resolved", "all"] as View[]).map((v) => (
+              <button
+                key={v}
+                role="tab"
+                aria-selected={view === v}
+                onClick={() => setView(v)}
+                className={cn(
+                  "rounded px-3 py-1.5 font-medium capitalize transition-colors",
+                  view === v
+                    ? "bg-navy text-navy-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {v} <span className="tabular-nums opacity-70">{counts[v]}</span>
+              </button>
+            ))}
+          </div>
         </div>
       </header>
 
@@ -209,51 +238,64 @@ export function EscalationTable({
                     <tr className="border-b border-border bg-surface-subtle/60">
                       <td />
                       <td colSpan={8} className="px-3 pb-4 pt-2">
-                        <div className="grid gap-4 md:grid-cols-[2fr_1fr]">
-                          <div>
+                        <div
+                          className="grid gap-5 lg:grid-cols-[2fr_1.2fr_1fr]"
+                          onClick={(ev) => ev.stopPropagation()}
+                        >
+                          <div className="space-y-3">
+                            <div>
+                              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                                Issue description
+                              </p>
+                              <p className="mt-1 text-sm leading-relaxed text-foreground">
+                                {e.description}
+                              </p>
+                            </div>
+                            {e.rootCauseTag && (
+                              <p className="text-xs text-muted-foreground">
+                                Root cause tag{" "}
+                                <span className="rounded bg-navy/10 px-1.5 py-0.5 font-medium text-navy">
+                                  {e.rootCauseTag}
+                                </span>
+                              </p>
+                            )}
+                            <EditPanel
+                              e={e}
+                              onPatch={onPatch}
+                              onSeverityChange={onSeverityChange}
+                            />
+                          </div>
+
+                          <div className="rounded-md border border-border bg-card p-3">
                             <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                              Issue description
+                              Cost of this escalation
                             </p>
-                            <p className="mt-1 text-sm leading-relaxed text-foreground">
-                              {e.description}
+                            <p className="mt-1 text-xl font-semibold tabular-nums text-foreground">
+                              {gbp(handlingCost(e) + e.feeCredit)}
+                            </p>
+                            <p className="text-[11px] text-muted-foreground">
+                              {e.handlingHours}h at {e.handlingGrade} rate = {gbp(handlingCost(e))}
+                              {e.feeCredit > 0
+                                ? ` plus ${gbp(e.feeCredit)} credited to client`
+                                : ""}
                             </p>
                           </div>
-                          <dl
-                            className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs"
-                            onClick={(ev) => ev.stopPropagation()}
-                          >
-                            <dt className="text-muted-foreground">Owner</dt>
-                            <dd className="text-foreground">{e.owner ?? "Unassigned"}</dd>
-                            <dt className="text-muted-foreground">Resolved</dt>
-                            <dd className="text-foreground">
-                              {e.resolvedAt ? formatDateTime(e.resolvedAt) : "–"}
-                            </dd>
-                            <dt className="self-center text-muted-foreground">Severity</dt>
-                            <dd>
-                              {e.severity && e.status !== "triaging" ? (
-                                <Select
-                                  value={e.severity}
-                                  onValueChange={(v) => onSeverityChange(e.id, v as Severity)}
-                                >
-                                  <SelectTrigger
-                                    className="h-8 w-32 bg-card text-xs"
-                                    aria-label="Change severity"
-                                  >
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {SEVERITIES.map((s) => (
-                                      <SelectItem key={s} value={s}>
-                                        {s}
-                                      </SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                              ) : (
-                                "–"
-                              )}
-                            </dd>
-                          </dl>
+
+                          <div className="rounded-md border border-border bg-card p-3">
+                            <p className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                              <History className="size-3" /> Audit trail
+                            </p>
+                            <ol className="mt-2 space-y-1.5 text-[11px]">
+                              {[...e.history].reverse().map((h, i) => (
+                                <li key={`${h.at}-${i}`} className="text-muted-foreground">
+                                  <span className="font-medium text-foreground">{h.action}</span>
+                                  {h.detail ? ` · ${h.detail}` : ""}
+                                  <br />
+                                  {formatDateTime(h.at)} · {h.by}
+                                </li>
+                              ))}
+                            </ol>
+                          </div>
                         </div>
                       </td>
                     </tr>
@@ -272,5 +314,155 @@ export function EscalationTable({
         </table>
       </div>
     </section>
+  );
+}
+
+/** Owner, severity override with a reason, and the handling cost inputs. */
+function EditPanel({
+  e,
+  onPatch,
+  onSeverityChange,
+}: {
+  e: Escalation;
+  onPatch: (id: string, changes: Partial<Escalation>, action: string, detail?: string) => void;
+  onSeverityChange: (id: string, s: Severity, reason: string) => void;
+}) {
+  const [owner, setOwner] = useState(e.owner ?? "");
+  const [hours, setHours] = useState(String(e.handlingHours));
+  const [credit, setCredit] = useState(String(e.feeCredit));
+  const [pending, setPending] = useState<Severity | null>(null);
+  const [reason, setReason] = useState("");
+
+  const num = (v: string, min = 0) => Math.max(min, Number(v) || 0);
+
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      <div className="space-y-1.5">
+        <Label htmlFor={`owner-${e.id}`} className="text-xs">
+          Owner
+        </Label>
+        <Input
+          id={`owner-${e.id}`}
+          className="h-8 bg-card text-xs"
+          value={owner}
+          placeholder="Unassigned"
+          onChange={(ev) => setOwner(ev.target.value)}
+          onBlur={() => {
+            const v = owner.trim() || null;
+            if (v !== e.owner)
+              onPatch(e.id, { owner: v }, v ? `Assigned to ${v}` : "Owner cleared");
+          }}
+        />
+      </div>
+
+      <div className="space-y-1.5">
+        <Label className="text-xs">Severity</Label>
+        {e.severity && e.status !== "triaging" ? (
+          <Select value={pending ?? e.severity} onValueChange={(v) => setPending(v as Severity)}>
+            <SelectTrigger className="h-8 bg-card text-xs" aria-label="Change severity">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SEVERITIES.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {s}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <p className="text-xs text-muted-foreground">Awaiting triage</p>
+        )}
+      </div>
+
+      {pending && pending !== e.severity && (
+        <div className="space-y-1.5 rounded-md border border-warning/40 bg-warning/10 p-2.5 sm:col-span-2">
+          <Label htmlFor={`reason-${e.id}`} className="text-xs">
+            Why is {e.severity} wrong? (recorded in the audit trail)
+          </Label>
+          <div className="flex gap-2">
+            <Input
+              id={`reason-${e.id}`}
+              className="h-8 bg-card text-xs"
+              value={reason}
+              placeholder="Client confirmed funds received, impact lower than reported"
+              onChange={(ev) => setReason(ev.target.value)}
+            />
+            <Button
+              size="sm"
+              disabled={reason.trim().length < 3}
+              onClick={() => {
+                onSeverityChange(e.id, pending, reason.trim());
+                setPending(null);
+                setReason("");
+              }}
+            >
+              Save
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setPending(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-1.5">
+        <Label htmlFor={`hours-${e.id}`} className="text-xs">
+          Handling hours
+        </Label>
+        <div className="flex gap-2">
+          <Input
+            id={`hours-${e.id}`}
+            type="number"
+            min={0}
+            step={0.5}
+            className="h-8 bg-card text-xs"
+            value={hours}
+            onChange={(ev) => setHours(ev.target.value)}
+            onBlur={() => {
+              const v = num(hours);
+              if (v !== e.handlingHours)
+                onPatch(e.id, { handlingHours: v }, "Handling hours updated", `${v}h`);
+            }}
+          />
+          <Select
+            value={e.handlingGrade}
+            onValueChange={(v) =>
+              onPatch(e.id, { handlingGrade: v as HandlingGrade }, "Handling grade updated", v)
+            }
+          >
+            <SelectTrigger className="h-8 w-36 bg-card text-xs" aria-label="Handling grade">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {HANDLING_GRADES.map((g) => (
+                <SelectItem key={g} value={g}>
+                  {g}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor={`credit-${e.id}`} className="text-xs">
+          Fee credit given (£)
+        </Label>
+        <Input
+          id={`credit-${e.id}`}
+          type="number"
+          min={0}
+          step={50}
+          className="h-8 bg-card text-xs"
+          value={credit}
+          onChange={(ev) => setCredit(ev.target.value)}
+          onBlur={() => {
+            const v = num(credit);
+            if (v !== e.feeCredit) onPatch(e.id, { feeCredit: v }, "Fee credit updated", gbp(v));
+          }}
+        />
+      </div>
+    </div>
   );
 }
