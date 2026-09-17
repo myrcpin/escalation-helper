@@ -1,24 +1,43 @@
 import { createFileRoute } from "@tanstack/react-router";
 
-// No head() here: the home route inherits title/description/og/twitter from
-// __root.tsx, and ships no og:image so serve-time hosting can inject the
-// project's social preview (explicit og:image or latest screenshot).
 export const Route = createFileRoute("/")({
+  head: () => ({
+    meta: [
+      { title: "Escalation Triage" },
+      {
+        name: "description",
+        content:
+          "Escalation Triage — a focused workspace for triaging and resolving escalations.",
+      },
+      { property: "og:title", content: "Escalation Triage" },
+      {
+        property: "og:description",
+        content:
+          "A focused workspace for triaging and resolving escalations.",
+      },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
+    ],
+  }),
   component: Index,
 });
 
-// IMPORTANT: Replace this placeholder. See ./README.md for routing conventions.
 function Index() {
   return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
-    </div>
+    <main className="flex min-h-svh flex-col">
+      <section className="flex flex-1 flex-col items-center justify-center px-6 text-center">
+        <span className="mb-5 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-muted-foreground">
+          <span className="size-1.5 rounded-full bg-emerald-500" />
+          Ready to build
+        </span>
+        <h1 className="text-4xl font-semibold tracking-tight text-foreground sm:text-5xl">
+          Escalation Triage
+        </h1>
+        <p className="mt-4 max-w-md text-balance text-sm text-muted-foreground sm:text-base">
+          A focused workspace for triaging and resolving escalations. This is a
+          starting shell — add your queue, priorities, and workflows next.
+        </p>
+      </section>
+    </main>
   );
 }
