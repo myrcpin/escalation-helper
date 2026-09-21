@@ -113,6 +113,8 @@ You are given escalations from one reporting period, each with a category and a 
 Write 2 to 4 short paragraphs of plain English for an operations governance forum:
 - Name the themes that actually repeat, and say which clients and categories they touch.
 - Call out where issues in DIFFERENT categories share the same underlying cause, since a category count hides that. This is the most valuable part.
+- Mention any client with repeated escalations, since that is a relationship risk.
+- Root causes marked "confirmed" were verified at resolution; "AI guess" ones were not. Weigh confirmed causes more and say when a theme rests mostly on guesses.
 - Note anything that looks like it will recur unless the cause is fixed, and what the review should look at.
 Be specific and quote reference numbers. No bullet lists, no headings, no markdown, no em dashes.
 Say plainly if there is too little data to draw a theme.`;

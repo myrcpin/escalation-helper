@@ -12,8 +12,10 @@ import {
   gbp,
   inPeriod,
   lastDays,
+  clientPatterns,
   periodMetrics,
   rootCauseThemes,
+  tagCorrections,
   slaDeadline,
   urgencyOf,
   type Escalation,
@@ -43,7 +45,7 @@ const narrativeRows = (list: Escalation[]) =>
   list
     .map(
       (e) =>
-        `${e.id} | ${e.client} | ${e.category} | ${e.severity ?? "untriaged"} | ${e.rootCauseTag ?? "untagged"} | ${e.rootCause ?? ""} | ${e.status}`,
+        `${e.id} | ${e.client} | ${e.category} | ${e.severity ?? "untriaged"} | ${e.rootCauseTag ?? "untagged"} (${e.rootCauseConfirmed ? "confirmed" : "AI guess"}) | ${e.rootCause ?? ""} | ${e.status}${e.resolutionNote ? ` | resolution: ${e.resolutionNote}` : ""}`,
     )
     .join("\n");
 
@@ -98,6 +100,9 @@ export function ReportView({
   const m = periodMetrics(items, from, to);
   const themes = rootCauseThemes(items, to, from);
   const crossCategory = themes.filter((t) => t.crossCategory);
+  const repeatClients = clientPatterns(items, to, from).filter((c) => c.count >= 2);
+  const corrections = tagCorrections(list);
+  const confirmedCount = list.filter((e) => e.rootCauseConfirmed).length;
   const worst = [...list]
     .filter((e) => e.status === "resolved" && e.resolvedAt && e.slaHours != null)
     .map((e) => ({
@@ -348,6 +353,51 @@ export function ReportView({
           )}
 
           <div className="rounded-lg border border-border bg-card p-4">
+            <h3 className="text-sm font-semibold text-foreground">Clients escalating repeatedly</h3>
+            {repeatClients.length === 0 ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                No client escalated more than once in this period.
+              </p>
+            ) : (
+              <ul className="mt-2 space-y-1.5 text-xs">
+                {repeatClients.map((c) => (
+                  <li key={c.client} className="flex flex-wrap justify-between gap-2">
+                    <span className="text-foreground">
+                      <span className="font-semibold">{c.client}</span> · {c.count} escalations ·{" "}
+                      {c.categories.join(", ")}
+                    </span>
+                    <span className={c.flagged ? "font-medium text-navy" : "text-muted-foreground"}>
+                      {gbp(c.cost)}
+                      {c.flagged ? " · flagged" : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="rounded-lg border border-border bg-card p-4">
+            <h3 className="text-sm font-semibold text-foreground">Root cause accuracy</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {confirmedCount} of {list.length} escalations have a cause confirmed at resolution.{" "}
+              {corrections.length === 0
+                ? "No AI tags were corrected."
+                : `${corrections.length} AI ${corrections.length === 1 ? "tag was" : "tags were"} corrected, useful for tuning the triage prompt:`}
+            </p>
+            {corrections.length > 0 && (
+              <ul className="mt-2 space-y-1 text-xs">
+                {corrections.map((e) => (
+                  <li key={e.id} className="text-foreground">
+                    <span className="font-mono text-[11px] text-muted-foreground">{e.id}</span> AI
+                    said {e.aiRootCauseTag}, confirmed as{" "}
+                    <span className="font-semibold">{e.rootCauseTag}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="rounded-lg border border-border bg-card p-4">
             <h3 className="text-sm font-semibold text-foreground">Worst SLA breaches</h3>
             {worst.length === 0 ? (
               <p className="mt-1 text-xs text-muted-foreground">
@@ -406,7 +456,13 @@ export function ReportView({
                     <span className="text-foreground">
                       {r.subject}{" "}
                       <span className="text-muted-foreground">
-                        ({r.kind === "category" ? "category" : "underlying cause"})
+                        (
+                        {r.kind === "category"
+                          ? "category"
+                          : r.kind === "client"
+                            ? "repeat client"
+                            : "underlying cause"}
+                        )
                       </span>
                     </span>
                     <span className="text-muted-foreground">

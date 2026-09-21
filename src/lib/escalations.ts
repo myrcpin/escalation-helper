@@ -83,6 +83,11 @@ export type Escalation = {
   resolvedAt: string | null;
   owner: string | null;
   rootCauseTag: RootCauseTag | null;
+  /** What the AI (or rules) first said, kept so corrections can be measured. */
+  aiRootCauseTag: RootCauseTag | null;
+  /** True once the owner confirmed or corrected the cause at resolution. */
+  rootCauseConfirmed: boolean;
+  resolutionNote: string | null;
   handlingHours: number;
   handlingGrade: HandlingGrade;
   feeCredit: number;
@@ -92,7 +97,7 @@ export type Escalation = {
 /** A root cause review raised off a recurring category or a cross-category theme. */
 export type ReviewAction = {
   id: string;
-  kind: "category" | "rootCause";
+  kind: "category" | "rootCause" | "client";
   subject: string;
   owner: string;
   dueDate: string;
@@ -252,6 +257,46 @@ export function rootCauseThemes(
     .sort((a, b) => b.count - a.count);
 }
 
+export type ClientPattern = {
+  client: string;
+  count: number;
+  open: number;
+  categories: Category[];
+  cost: number;
+  ids: string[];
+  /** Repeat escalations from one client: the early warning on a mandate at risk. */
+  flagged: boolean;
+};
+
+export function clientPatterns(
+  items: Escalation[],
+  now = Date.now(),
+  from = lastDays(PATTERN_WINDOW_DAYS, now),
+): ClientPattern[] {
+  const byClient = new Map<string, Escalation[]>();
+  for (const e of inPeriod(items, from, now)) {
+    const key = e.client.trim();
+    byClient.set(key, [...(byClient.get(key) ?? []), e]);
+  }
+  return [...byClient.entries()]
+    .map(([client, list]) => ({
+      client,
+      count: list.length,
+      open: list.filter((e) => e.status !== "resolved").length,
+      categories: [...new Set(list.map((e) => e.category))],
+      cost: list.reduce((s, e) => s + totalCost(e), 0),
+      ids: list.map((e) => e.id),
+      flagged: list.length >= PATTERN_THRESHOLD,
+    }))
+    .sort((a, b) => b.count - a.count);
+}
+
+/** Resolved escalations where the owner changed the AI's root cause: prompt-tuning evidence. */
+export const tagCorrections = (items: Escalation[]) =>
+  items.filter(
+    (e) => e.rootCauseConfirmed && e.aiRootCauseTag && e.aiRootCauseTag !== e.rootCauseTag,
+  );
+
 /* ---------- reporting ---------- */
 
 export type PeriodMetrics = {
@@ -326,6 +371,9 @@ export function toCsv(items: Escalation[]) {
     "Grade",
     "Handling cost (GBP)",
     "Fee credit (GBP)",
+    "Root cause confirmed",
+    "AI root cause tag",
+    "Resolution note",
   ];
   const cell = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const rows = items.map((e) =>
@@ -347,6 +395,9 @@ export function toCsv(items: Escalation[]) {
       e.handlingGrade,
       handlingCost(e),
       e.feeCredit,
+      e.rootCauseConfirmed ? "yes" : "no",
+      e.aiRootCauseTag ?? "",
+      e.resolutionNote ?? "",
     ]
       .map(cell)
       .join(","),
@@ -406,7 +457,13 @@ const seed = (
   description: string,
   rootCause: string,
   tag: RootCauseTag,
-  opts: { resolvedHoursAgo?: number; owner?: string; feeCredit?: number; hours?: number } = {},
+  opts: {
+    resolvedHoursAgo?: number;
+    owner?: string;
+    feeCredit?: number;
+    hours?: number;
+    note?: string;
+  } = {},
 ): Escalation => ({
   id: `ESC-${1040 + n}`,
   client,
@@ -421,6 +478,10 @@ const seed = (
   resolvedAt: opts.resolvedHoursAgo != null ? ago(opts.resolvedHoursAgo) : null,
   owner: opts.owner ?? null,
   rootCauseTag: tag,
+  aiRootCauseTag: tag,
+  rootCauseConfirmed: opts.resolvedHoursAgo != null,
+  resolutionNote:
+    opts.resolvedHoursAgo != null ? (opts.note ?? "Resolved and confirmed with client.") : null,
   handlingHours: opts.hours ?? DEFAULT_HANDLING[severity].hours,
   handlingGrade: DEFAULT_HANDLING[severity].grade,
   feeCredit: opts.feeCredit ?? 0,
@@ -521,7 +582,12 @@ export const seedEscalations = (): Escalation[] => [
     "Outbound EUR payment returned by the beneficiary bank citing an invalid IBAN.",
     "Beneficiary static data captured with a transposed IBAN digit.",
     "Static or reference data",
-    { resolvedHoursAgo: 26, owner: "S. Patel", feeCredit: 500 },
+    {
+      resolvedHoursAgo: 26,
+      owner: "S. Patel",
+      feeCredit: 500,
+      note: "IBAN corrected in static data, payment re-sent same day. Fee for returned payment refunded.",
+    },
   ),
   seed(
     8,
@@ -532,7 +598,13 @@ export const seedEscalations = (): Escalation[] => [
     "Redemption proceeds of £30m not paid on value date, client facing late payment penalties.",
     "Cut-off missed after an overnight batch failure in the cash platform.",
     "Batch or cut-off failure",
-    { resolvedHoursAgo: 88, owner: "J. Okoro", feeCredit: 8500, hours: 9 },
+    {
+      resolvedHoursAgo: 88,
+      owner: "J. Okoro",
+      feeCredit: 8500,
+      hours: 9,
+      note: "Batch rerun after platform fix. Client late payment penalties reimbursed.",
+    },
   ),
   seed(
     9,
@@ -543,7 +615,12 @@ export const seedEscalations = (): Escalation[] => [
     "Standing order to a supplier failed twice this week with a generic rejection code.",
     "Payment held by sanctions screening due to a partial name match.",
     "Screening or sanctions hold",
-    { resolvedHoursAgo: 205, owner: "A. Brennan", feeCredit: 250 },
+    {
+      resolvedHoursAgo: 205,
+      owner: "A. Brennan",
+      feeCredit: 250,
+      note: "Compliance cleared the name match. Supplier added to the screening allow list.",
+    },
   ),
   seed(
     10,
@@ -554,6 +631,10 @@ export const seedEscalations = (): Escalation[] => [
     "Dividend cash from a Swedish holding not reflected in the client's cash balance.",
     "Foreign income pending FX conversion instruction.",
     "Manual handoff",
-    { resolvedHoursAgo: 398, owner: "M. Chen" },
+    {
+      resolvedHoursAgo: 398,
+      owner: "M. Chen",
+      note: "FX instruction obtained from client, dividend credited.",
+    },
   ),
 ];

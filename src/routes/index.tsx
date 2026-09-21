@@ -27,6 +27,7 @@ import {
   toCsv,
   type Escalation,
   type ReviewAction,
+  type RootCauseTag,
   type Severity,
 } from "@/lib/escalations";
 
@@ -96,6 +97,9 @@ function Index() {
         slaHours: null,
         rootCause: null,
         rootCauseTag: null,
+        aiRootCauseTag: null,
+        rootCauseConfirmed: false,
+        resolutionNote: null,
         triageSource: null,
         resolvedAt: null,
         owner: null,
@@ -123,6 +127,7 @@ function Index() {
         slaHours: applied.slaHours,
         rootCause: applied.rootCause,
         rootCauseTag: applied.rootCauseTag,
+        aiRootCauseTag: applied.rootCauseTag,
         triageSource: applied.triageSource,
         handlingHours: DEFAULT_HANDLING[applied.severity].hours,
         handlingGrade: DEFAULT_HANDLING[applied.severity].grade,
@@ -140,12 +145,36 @@ function Index() {
       });
   };
 
-  const resolve = (id: string) => {
-    patch(id, { status: "resolved", resolvedAt: new Date().toISOString() }, "Resolved");
-    toast.success(`${id} resolved`);
+  /** Resolution confirms or corrects the root cause, so patterns run on confirmed causes. */
+  const resolve = (id: string, tag: RootCauseTag, note: string) => {
+    const e = items.find((x) => x.id === id);
+    const corrected = e?.rootCauseTag && e.rootCauseTag !== tag;
+    patch(
+      id,
+      {
+        status: "resolved",
+        resolvedAt: new Date().toISOString(),
+        rootCauseTag: tag,
+        rootCauseConfirmed: true,
+        resolutionNote: note,
+      },
+      "Resolved",
+      corrected
+        ? `Root cause corrected from ${e?.rootCauseTag} to ${tag} · ${note}`
+        : `Root cause confirmed: ${tag} · ${note}`,
+    );
+    toast.success(`${id} resolved`, {
+      description: corrected ? `Root cause corrected to ${tag}.` : "Root cause confirmed.",
+    });
   };
 
-  const reopen = (id: string) => patch(id, { status: "open", resolvedAt: null }, "Reopened");
+  const reopen = (id: string) =>
+    patch(
+      id,
+      { status: "open", resolvedAt: null, rootCauseConfirmed: false },
+      "Reopened",
+      "Root cause back to unconfirmed",
+    );
 
   const changeSeverity = (id: string, severity: Severity, reason: string) => {
     const before = items.find((e) => e.id === id)?.severity;

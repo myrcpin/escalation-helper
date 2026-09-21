@@ -10,6 +10,15 @@ import {
   Sparkles,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,6 +31,7 @@ import {
 import { SeverityBadge, SlaIndicator } from "@/components/StatusBadges";
 import {
   HANDLING_GRADES,
+  ROOT_CAUSE_TAGS,
   SEVERITIES,
   SEVERITY_RANK,
   formatDateTime,
@@ -30,6 +40,7 @@ import {
   slaDeadline,
   type Escalation,
   type HandlingGrade,
+  type RootCauseTag,
   type Severity,
 } from "@/lib/escalations";
 import { cn } from "@/lib/utils";
@@ -48,7 +59,7 @@ export function EscalationTable({
 }: {
   items: Escalation[];
   now: number;
-  onResolve: (id: string) => void;
+  onResolve: (id: string, tag: RootCauseTag, note: string) => void;
   onReopen: (id: string) => void;
   onSeverityChange: (id: string, s: Severity, reason: string) => void;
   onPatch: (id: string, changes: Partial<Escalation>, action: string, detail?: string) => void;
@@ -57,6 +68,7 @@ export function EscalationTable({
   const [view, setView] = useState<View>("open");
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: "deadline", asc: true });
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [resolving, setResolving] = useState<Escalation | null>(null);
 
   const counts = {
     open: items.filter((e) => e.status !== "resolved").length,
@@ -223,7 +235,7 @@ export function EscalationTable({
                     </td>
                     <td className="px-3 py-3 text-right" onClick={(ev) => ev.stopPropagation()}>
                       {e.status === "open" && (
-                        <Button size="sm" variant="outline" onClick={() => onResolve(e.id)}>
+                        <Button size="sm" variant="outline" onClick={() => setResolving(e)}>
                           <CheckCircle2 className="size-3.5" /> Resolve
                         </Button>
                       )}
@@ -252,11 +264,34 @@ export function EscalationTable({
                               </p>
                             </div>
                             {e.rootCauseTag && (
-                              <p className="text-xs text-muted-foreground">
-                                Root cause tag{" "}
+                              <p className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                                Root cause tag
                                 <span className="rounded bg-navy/10 px-1.5 py-0.5 font-medium text-navy">
                                   {e.rootCauseTag}
                                 </span>
+                                {e.rootCauseConfirmed ? (
+                                  <span className="rounded bg-success/10 px-1.5 py-0.5 font-medium text-success">
+                                    Confirmed at resolution
+                                  </span>
+                                ) : (
+                                  <span className="rounded bg-secondary px-1.5 py-0.5 text-secondary-foreground">
+                                    {e.triageSource === "rules" ? "Rules guess" : "AI guess"},
+                                    confirmed when resolved
+                                  </span>
+                                )}
+                                {e.rootCauseConfirmed &&
+                                  e.aiRootCauseTag &&
+                                  e.aiRootCauseTag !== e.rootCauseTag && (
+                                    <span className="text-[11px]">
+                                      (AI said {e.aiRootCauseTag})
+                                    </span>
+                                  )}
+                              </p>
+                            )}
+                            {e.resolutionNote && (
+                              <p className="text-xs text-foreground">
+                                <span className="text-muted-foreground">Resolution: </span>
+                                {e.resolutionNote}
                               </p>
                             )}
                             <EditPanel
@@ -313,6 +348,14 @@ export function EscalationTable({
           </tbody>
         </table>
       </div>
+      <ResolveDialog
+        e={resolving}
+        onClose={() => setResolving(null)}
+        onResolve={(id, tag, note) => {
+          onResolve(id, tag, note);
+          setResolving(null);
+        }}
+      />
     </section>
   );
 }
@@ -443,6 +486,9 @@ function EditPanel({
             </SelectContent>
           </Select>
         </div>
+        <p className="text-[11px] text-muted-foreground">
+          Staff time spent resolving this escalation, and the grade doing most of it.
+        </p>
       </div>
 
       <div className="space-y-1.5">
@@ -462,7 +508,96 @@ function EditPanel({
             if (v !== e.feeCredit) onPatch(e.id, { feeCredit: v }, "Fee credit updated", gbp(v));
           }}
         />
+        <p className="text-[11px] text-muted-foreground">
+          Money given back to the client: fees waived, penalties reimbursed or compensation paid.
+          Leave at 0 if none.
+        </p>
       </div>
     </div>
+  );
+}
+
+/** Resolving confirms or corrects the root cause and records what was done. */
+function ResolveDialog({
+  e,
+  onClose,
+  onResolve,
+}: {
+  e: Escalation | null;
+  onClose: () => void;
+  onResolve: (id: string, tag: RootCauseTag, note: string) => void;
+}) {
+  const [tag, setTag] = useState<RootCauseTag>("Unclassified");
+  const [note, setNote] = useState("");
+  const [lastId, setLastId] = useState<string | null>(null);
+
+  // Reset the form whenever a different escalation is opened.
+  if (e && e.id !== lastId) {
+    setLastId(e.id);
+    setTag(e.rootCauseTag ?? "Unclassified");
+    setNote("");
+  }
+
+  return (
+    <Dialog open={e !== null} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Resolve {e?.id}</DialogTitle>
+          <DialogDescription>
+            Confirm the underlying cause now that you know it. Patterns and reports use confirmed
+            causes, so a correction here makes the cross-category flags more accurate.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label className="text-xs">Confirmed root cause</Label>
+            <Select value={tag} onValueChange={(v) => setTag(v as RootCauseTag)}>
+              <SelectTrigger aria-label="Confirmed root cause">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {ROOT_CAUSE_TAGS.map((t) => (
+                  <SelectItem key={t} value={t}>
+                    {t}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {e?.rootCauseTag && (
+              <p className="text-[11px] text-muted-foreground">
+                {e.triageSource === "rules" ? "Rules" : "AI"} suggested: {e.rootCauseTag}
+                {tag !== e.rootCauseTag ? " (you are correcting it, this is recorded)" : ""}
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="resolution-note" className="text-xs">
+              What was done to resolve it
+            </Label>
+            <Textarea
+              id="resolution-note"
+              rows={3}
+              value={note}
+              placeholder="Static data corrected, payment re-sent, client confirmed receipt."
+              onChange={(ev) => setNote(ev.target.value)}
+            />
+          </div>
+        </div>
+
+        <DialogFooter className="gap-2 sm:gap-2">
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            disabled={note.trim().length < 5}
+            onClick={() => e && onResolve(e.id, tag, note.trim())}
+          >
+            <CheckCircle2 className="size-4" /> Resolve
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

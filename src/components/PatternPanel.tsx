@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Layers, Repeat, UserCheck } from "lucide-react";
+import { Building2, Layers, Repeat, UserCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -7,6 +7,7 @@ import {
   PATTERN_THRESHOLD,
   PATTERN_WINDOW_DAYS,
   categoryPatterns,
+  clientPatterns,
   gbp,
   rootCauseThemes,
   type Escalation,
@@ -64,7 +65,7 @@ function AssignReview({
         className="mt-2 h-7 bg-card text-[11px] print:hidden"
         onClick={() => setOpen(true)}
       >
-        Assign root cause review
+        {kind === "client" ? "Assign client review" : "Assign root cause review"}
       </Button>
     );
 
@@ -147,6 +148,9 @@ export function PatternPanel({
   const themes = rootCauseThemes(items, now, from);
   const recurring = rows.filter((r) => r.recurring);
   const flaggedThemes = themes.filter((t) => t.flagged);
+  const flaggedClients = clientPatterns(items, now, from).filter((c) => c.flagged);
+  const confirmedIn = (ids: string[]) =>
+    items.filter((e) => ids.includes(e.id) && e.rootCauseConfirmed).length;
   const max = Math.max(PATTERN_THRESHOLD, ...rows.map((r) => r.count));
   const reviewFor = (kind: ReviewAction["kind"], subject: string) =>
     reviews.find((r) => r.kind === kind && r.subject === subject);
@@ -161,7 +165,7 @@ export function PatternPanel({
       </header>
 
       <div className="space-y-4 p-5">
-        {recurring.length === 0 && flaggedThemes.length === 0 && (
+        {recurring.length === 0 && flaggedThemes.length === 0 && flaggedClients.length === 0 && (
           <p className="rounded-md bg-surface-subtle px-3 py-2 text-xs text-muted-foreground">
             No recurring issues detected in this period.
           </p>
@@ -210,11 +214,43 @@ export function PatternPanel({
               credits. A category count alone would not show this.
             </p>
             <p className="mt-1 font-mono text-[10px] text-muted-foreground">{t.ids.join(" · ")}</p>
+            <p className="text-[10px] text-muted-foreground">
+              {confirmedIn(t.ids)} of {t.count} causes confirmed at resolution, the rest are AI
+              guesses
+            </p>
             <AssignReview
               kind="rootCause"
               subject={t.tag}
               {...(reviewFor("rootCause", t.tag)
                 ? { existing: reviewFor("rootCause", t.tag) }
+                : {})}
+              onAssign={onAssignReview}
+              onComplete={onCompleteReview}
+            />
+          </div>
+        ))}
+
+        {flaggedClients.map((c) => (
+          <div
+            key={c.client}
+            data-testid="client-alert"
+            className="rounded-md border border-navy/30 bg-navy/5 px-3 py-2.5"
+          >
+            <p className="flex items-center gap-1.5 text-sm font-semibold text-navy">
+              <Building2 className="size-4 shrink-0" />
+              Repeat client: {c.client}
+            </p>
+            <p className="mt-0.5 text-xs text-foreground">
+              {c.count} escalations in the {windowLabel} ({c.open} still open) across{" "}
+              {c.categories.join(", ")}, {gbp(c.cost)} of handling cost and credits. Relationship
+              risk: brief the relationship manager before the next service review.
+            </p>
+            <p className="mt-1 font-mono text-[10px] text-muted-foreground">{c.ids.join(" · ")}</p>
+            <AssignReview
+              kind="client"
+              subject={c.client}
+              {...(reviewFor("client", c.client)
+                ? { existing: reviewFor("client", c.client) }
                 : {})}
               onAssign={onAssignReview}
               onComplete={onCompleteReview}
